@@ -1,0 +1,45 @@
+{
+  "subsystems": [
+    {
+      "subsystem": "bdev",
+      "config": [
+        {
+          "method": "bdev_wait_for_examine"
+        }
+      ]
+    },
+    {
+      "subsystem": "iobuf",
+      "config": [
+        {
+          "method": "iobuf_set_options",
+          "params": {
+            "large_pool_count": 2048,
+            "small_pool_count": 8192,
+            "large_bufsize": 1048576
+          }
+        }
+      ]
+    },
+    {
+      "subsystem": "nvmf",
+      "config": [
+        {
+          "method": "nvmf_create_transport",
+          "params": {
+            "trtype": "TCP",
+            "max_io_size": 1048576,
+            "io_unit_size": 1048576,
+            "keep_alive_timeout_ms": 30000
+          }
+        }
+      ]
+    }
+  ],
+  "log": [
+    {
+      "level": "debug",
+      "type": "console"
+    }
+  ]
+}

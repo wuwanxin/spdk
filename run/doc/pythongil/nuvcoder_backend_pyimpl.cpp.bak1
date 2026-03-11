@@ -1,0 +1,304 @@
+#include "nuvcoder_backend_pyimpl.hpp"
+#include <iostream>
+#include <stdexcept>
+#include <filesystem>
+#include <sstream>
+#include <thread>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
+
+const char* GetCuErrorString(CUresult error) {
+    const char* str = nullptr;
+    if (cuGetErrorString(error, &str) != CUDA_SUCCESS) {
+        return "Unknown CUresult error";
+    }
+    return str;
+}
+
+namespace fs = std::filesystem;
+namespace py = pybind11;
+
+// 移除 static PythonInitializationState python_state;
+
+// Constructor
+NuvcoderPythonBackend::NuvcoderPythonBackend()
+    : guard_(), // pybind11::scoped_interpreter 会在这里初始化 Python 解释器和线程支持
+      encode_module_(),
+      device_(torch::kCPU),
+      last_encoded_data_size_(0)
+{
+    std::cout << "NuvcoderPythonBackend created. Default device: CPU." << std::endl;
+    // guard_ 已经完成了 Py_Initialize() 和 PyEval_InitThreads()
+    // 并且在构造完成后，GIL 已经被释放，准备好被 PyGILState_Ensure() 获取。
+    std::cout << "DEBUG: pybind11::scoped_interpreter initialized Python environment with thread support." << std::endl;
+}
+
+// Destructor
+NuvcoderPythonBackend::~NuvcoderPythonBackend() {
+    shutdown();
+    std::cout << "NuvcoderPythonBackend destroyed." << std::endl;
+    // guard_ 的析构函数会自动调用 Py_Finalize()
+}
+
+// 修改 initialize 函数
+bool NuvcoderPythonBackend::initialize(const NuvcoderBackendConfig& config,
+                                       const std::string& model_path,
+                                       const torch::Device& device) {
+    this->config_ = config;
+    this->device_ = device;
+    this->python_script_dir_ = model_path;
+
+    std::cout << "DEBUG: NuvcoderPythonBackend::initialize called on thread ID: " 
+              << std::this_thread::get_id() << std::endl;
+
+    try {
+        // =================== 1. 移除自定义的 Python 环境初始化 ===================
+        // python_state.ensure_initialized_for_multithreading(); // <--- 移除此行
+        // std::cout << "DEBUG: Python environment initialized for multithreading" << std::endl;
+        // 解释器和线程支持已经在 NuvcoderPythonBackend 构造函数中由 guard_ 完成了
+
+        // =================== 2. 检查TensorRT引擎文件 ===================
+        fs::path engine_full_path = fs::path(model_path) / "engines/compress_fp16_0402.engine";
+        if (!fs::exists(engine_full_path)) {
+            std::cerr << "Error: TensorRT engine file not found at " << engine_full_path << std::endl;
+            return false;
+        }
+
+        // =================== 3. 初始化Python编码模块 ===================
+        int device_id = device.is_cuda() ? device.index() : 0;
+        
+        std::cout << "DEBUG: Acquiring GIL to initialize Python module..." << std::endl;
+        
+        // 获取GIL来调用Python代码
+        PyGILState_STATE gil_state = PyGILState_Ensure();
+        
+        try {
+            // 设置Python模块搜索路径
+            py::module_ sys = py::module_::import("sys");
+            sys.attr("path").attr("insert")(0, this->python_script_dir_);
+            
+            // 导入Python模块
+            encode_module_ = py::module_::import("inference_enc");
+            std::cout << "DEBUG: Successfully imported Python module: inference_enc" << std::endl;
+            
+            // 调用Python初始化函数
+            std::cout << "DEBUG: Calling Python initialize_encoder_module..." << std::endl;
+            py::object result = encode_module_.attr("initialize_encoder_module")(
+                engine_full_path.string(),
+                config.ec_thread,
+                config.stream_part_i,
+                device_id
+            );
+            
+            bool python_init_success = result.cast<bool>();
+            
+            if (python_init_success) {
+                std::cout << "DEBUG: Python encoder module initialized successfully." << std::endl;
+            } else {
+                std::cerr << "Error: Python encoder module initialization failed." << std::endl;
+            }
+            
+            // 释放GIL
+            PyGILState_Release(gil_state);
+            std::cout << "DEBUG: Released Python GIL." << std::endl;
+            
+            return python_init_success;
+
+        } catch (const py::error_already_set& e) {
+            PyGILState_Release(gil_state);
+            std::cerr << "Python Error during initialization: " << e.what() << std::endl;
+            PyErr_Print();
+            return false;
+        } catch (const std::exception& e) {
+            PyGILState_Release(gil_state);
+            std::cerr << "C++ Error during initialization: " << e.what() << std::endl;
+            return false;
+        }
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error during C++ initialization logic: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// encode 函数保持不变 (使用假数据返回的修改)
+std::vector<uint8_t> NuvcoderPythonBackend::encode(const torch::Tensor& input_tensor) {
+    if (!encode_module_) {
+        throw std::runtime_error("Python encoder module not initialized. Call initialize first.");
+    }
+
+    std::cout << "DEBUG: NuvcoderPythonBackend::encode called on thread ID: " 
+              << std::this_thread::get_id() << std::endl;
+
+    // 检查输入张量
+    bool is_correct_device = (input_tensor.device() == device_);
+    bool is_float_dtype = (input_tensor.dtype() == torch::kFloat || input_tensor.dtype() == torch::kFloat32);
+
+    std::cout << "DEBUG: Input tensor device: " << input_tensor.device() << std::endl;
+    std::cout << "DEBUG: Input tensor dtype: " << input_tensor.dtype() << std::endl;
+    std::cout << "DEBUG: Internal stored device_: " << device_ << std::endl;
+
+    if (!is_correct_device || !is_float_dtype) {
+        std::stringstream ss;
+        ss << "Input tensor must be on device " << device_
+           << " and of type float32. Got device: " << input_tensor.device()
+           << ", dtype: " << input_tensor.dtype();
+        throw std::runtime_error(ss.str());
+    }
+
+    if (input_tensor.dtype() != torch::kFloat32 && input_tensor.dtype() != torch::kFloat) {
+        throw std::runtime_error("Input tensor must be of type float32");
+    }
+
+    if (!input_tensor.is_contiguous()) {
+        throw std::runtime_error("Input tensor must be contiguous for Python backend.");
+    }
+
+    // 获取GIL确保线程安全
+    std::cout << "DEBUG: Acquiring GIL for encode..." << std::endl;
+    PyGILState_STATE gil_state = PyGILState_Ensure();
+
+    try {
+        // 获取CUDA设备指针
+        void* input_gpu_ptr = input_tensor.data_ptr();
+
+        // 可选：验证指针有效性
+        cudaPointerAttributes attr;
+        cudaError_t cuda_err = cudaPointerGetAttributes(&attr, input_gpu_ptr);
+        if (cuda_err != cudaSuccess) {
+            std::cerr << "Warning: Failed to get CUDA pointer attributes for input_gpu_ptr " 
+                      << input_gpu_ptr << ": " << cudaGetErrorString(cuda_err) << std::endl;
+        } else {
+            std::cout << "DEBUG: CUDA pointer attributes for input_gpu_ptr " << input_gpu_ptr 
+                      << " -> type: " << attr.type // 1=Host, 2=Device, 3=Managed
+                      << ", device: " << attr.device << std::endl;
+        }
+
+        // 将C++ CUDA指针转换为Python整数
+        py::object gpu_ptr_int_obj = py::cast((uintptr_t)input_gpu_ptr);
+
+        // 获取输入形状
+        py::list input_shape_py_list;
+        for (int64_t dim : input_tensor.sizes()) {
+            input_shape_py_list.append(dim);
+        }
+        py::tuple input_shape_py = py::tuple(input_shape_py_list);
+
+        // 获取原始图像尺寸
+        uint32_t pic_height = config_.image_height;
+        uint32_t pic_width = config_.image_width;
+
+        std::cout << "DEBUG: Calling Python encode_frame..." << std::endl;
+
+        // 调用Python的encode_frame函数
+        py::dict results = encode_module_.attr("encode_frame")(
+            gpu_ptr_int_obj,
+            input_shape_py,
+            pic_height,
+            pic_width
+        ).cast<py::dict>();
+
+        std::cout << "DEBUG: Python encode_frame returned. Results dict contains 'bit_stream': " 
+                  << std::boolalpha << results.contains("bit_stream") << std::endl;
+
+        // =========================================================================
+        // === 关键修改：在这里构造假数据，跳过Python返回的真实数据处理 ===
+        // =========================================================================
+        std::vector<uint8_t> fake_encoded_data(1024); // 构造一个1KB的假数据
+        for (size_t i = 0; i < fake_encoded_data.size(); ++i) {
+            fake_encoded_data[i] = static_cast<uint8_t>(i % 256); // 填充一些可辨认的模式
+        }
+        std::cout << "DEBUG: Returning fake encoded data of size " << fake_encoded_data.size() << " bytes." << std::endl;
+
+        // 释放GIL
+        PyGILState_Release(gil_state);
+        std::cout << "DEBUG: Released Python GIL for encode." << std::endl;
+
+        return fake_encoded_data; // 直接返回假数据，不处理Python的bit_stream
+
+        // =========================================================================
+        // === 以下是原始处理 Python 返回数据的代码，暂时注释掉 ===
+        // =========================================================================
+        /*
+        // 提取比特流
+        py::bytes bit_stream_bytes = results["bit_stream"].cast<py::bytes>();
+        std::string bit_stream_str = static_cast<std::string>(bit_stream_bytes);
+
+        last_encoded_data_.assign(bit_stream_str.begin(), bit_stream_str.end());
+        last_encoded_data_size_ = last_encoded_data_.size();
+
+        // 输出统计信息
+        std::cout << "Python Inference Time: " << results["inference_time_ms"].cast<double>() << " ms" << std::endl;
+        std::cout << "Python Encoding Time: " << results["encoding_time_ms"].cast<double>() << " ms" << std::endl;
+        std::cout << "Python Average BPP: " << results["avg_bpp"].cast<double>() << std::endl;
+        std::cout << "Bitstream length: " << last_encoded_data_size_ << " bytes" << std::endl;
+
+        // 释放GIL
+        PyGILState_Release(gil_state);
+        std::cout << "DEBUG: Released Python GIL for encode." << std::endl;
+
+        return last_encoded_data_;
+        */
+
+    } catch (const py::error_already_set& e) {
+        PyGILState_Release(gil_state);
+        std::cerr << "Python Error during encode: " << e.what() << std::endl;
+        PyErr_Print();
+        throw std::runtime_error("Python encoding failed.");
+    } catch (const std::exception& e) {
+        PyGILState_Release(gil_state);
+        std::cerr << "C++ Error during encode: " << e.what() << std::endl;
+        throw;
+    }
+}
+
+// 实现 INuvcoderBackend 接口的 get_encoded_data_size 方法
+size_t NuvcoderPythonBackend::get_encoded_data_size() const {
+    return last_encoded_data_size_;
+}
+
+// 实现 INuvcoderBackend 接口的 get_encoded_data_ptr 方法
+const uint8_t* NuvcoderPythonBackend::get_encoded_data_ptr() const {
+    if (last_encoded_data_.empty()) {
+        return nullptr;
+    }
+    return last_encoded_data_.data();
+}
+
+void NuvcoderPythonBackend::shutdown() {
+    if (encode_module_) {
+        std::cout << "DEBUG: Shutting down Python encoder module..." << std::endl;
+        
+        PyGILState_STATE gil_state = PyGILState_Ensure();
+        
+        try {
+            if (py::hasattr(encode_module_, "shutdown_encoder_module")) {
+                encode_module_.attr("shutdown_encoder_module")();
+                std::cout << "Python encoder module shut down successfully." << std::endl;
+            } else {
+                std::cout << "Warning: Python module 'inference_enc' has no 'shutdown_encoder_module' function." << std::endl;
+            }
+        } catch (const py::error_already_set& e) {
+            std::cerr << "Python Error during shutdown: " << e.what() << std::endl;
+            PyErr_Print();
+        } catch (const std::exception& e) {
+            std::cerr << "C++ Error during shutdown: " << e.what() << std::endl;
+        }
+        
+        PyGILState_Release(gil_state);
+        encode_module_ = py::module_(); // 清空模块对象
+        
+        std::cout << "DEBUG: Python encoder module shutdown completed." << std::endl;
+    }
+}
+
+void NuvcoderPythonBackend::flush() {
+    last_encoded_data_.clear();
+    last_encoded_data_size_ = 0;
+    std::cout << "NuvcoderPythonBackend flushed internal encoded data." << std::endl;
+}
+
+// 注册后端
+REGISTER_BACKEND("python_backend", NuvcoderPythonBackend)

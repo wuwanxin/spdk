@@ -1,0 +1,67 @@
+#!/bin/bash
+
+set -e  # 出错时退出
+
+echo "=== Starting NVMe-oF Target ==="
+
+# 检查配置文件
+if [ ! -f "target_config.json" ]; then
+    echo "Error: target_config.json not found!"
+    exit 1
+fi
+
+# 检查可执行文件
+if [ ! -x "../spdk/build/bin/nvmf_tgt" ]; then
+    echo "Error: nvmf_tgt not found or not executable!"
+    exit 1
+fi
+
+# 清理旧的 target 进程
+if pgrep -f nvmf_tgt > /dev/null; then
+    echo "Stopping existing nvmf_tgt process..."
+    sudo pkill -f nvmf_tgt
+    sleep 3
+fi
+
+echo "Setup spdk env..."
+../spdk/scripts/setup.sh
+# 启动 target
+echo "Starting nvmf_tgt..."
+../spdk/build/bin/nvmf_tgt -c target_config.json > spdk.log 2>&1 &
+TGT_PID=$!
+
+# 等待 target 启动并检查是否成功
+echo "Waiting for target to initialize..."
+MAX_WAIT=10
+for i in $(seq 1 $MAX_WAIT); do
+    if kill -0 $TGT_PID 2>/dev/null; then
+        # 检查是否已经开始监听
+        if grep -q "NVMf target started" spdk.log 2>/dev/null; then
+            echo "Target started successfully!"
+            break
+        fi
+    else
+        echo "Error: Target failed to start!"
+        cat spdk.log
+        exit 1
+    fi
+    sleep 1
+done
+
+# 运行 Python 脚本
+echo "Running manual_setup.py..."
+if python manual_setup.py; then
+    echo "Setup completed successfully!"
+else
+    echo "Error: manual_setup.py failed!"
+    kill $TGT_PID
+    exit 1
+fi
+
+echo ""
+echo "=== All Done ==="
+echo "Target PID: $TGT_PID"
+echo "Log file: spdk.log"
+echo ""
+echo "To monitor: tail -f spdk.log"
+echo "To stop: kill $TGT_PID"
