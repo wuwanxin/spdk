@@ -73,7 +73,7 @@ int xcoder_start_warmup(void) {
     
     nuvcoder_codec_config_t warmup_config;
     memset(&warmup_config, 0, sizeof(nuvcoder_codec_config_t));
-    
+
     int warmup_ret = nuvcoder_codec_warmup(&warmup_config);
     
     if (warmup_ret != NUVCODER_STATUS_SUCCESS) {

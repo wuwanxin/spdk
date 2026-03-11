@@ -30,7 +30,7 @@
 
 // 默认视频参数
 #define DEFAULT_FRAME_WIDTH         1920
-#define DEFAULT_FRAME_HEIGHT        1080
+#define DEFAULT_FRAME_HEIGHT        1088
 
 // 根据默认分辨率计算 NV12 帧大小
 // NV12: Y平面 + UV半平面 = width * height + width * height / 2 = width * height * 3/2
