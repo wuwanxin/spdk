@@ -48,20 +48,21 @@ int xcoder_start_warmup(void) {
     
     int64_t start_time = get_current_time_ms();
     
-    // ==================== 🎯 创建共享队列池（使用 XCODER_MAX_BYTES_PER_FRAME）====================
+    // ==================== 🎯 创建共享队列池 ====================
     SPDK_NOTICELOG("[Warmup] Creating queue pool with buffer size %u...\n", 
                    XCODER_MAX_BYTES_PER_FRAME);
     
-    // 使用 XCODER_MAX_BYTES_PER_FRAME 作为输入和输出缓冲区大小
     int ret = nuvcoder_queue_pool_create(
-        XCODER_MAX_BYTES_PER_FRAME,  // input buffer size
-        XCODER_MAX_BYTES_PER_FRAME   // output buffer size
+        XCODER_MAX_BYTES_PER_FRAME,
+        XCODER_MAX_BYTES_PER_FRAME
     );
     
     if (ret != 0) {
         SPDK_ERRLOG("[Warmup] ❌ Failed to create queue pool\n");
         g_warmup_result = -1;
         g_warmup_done = 1;
+        // ✅ 直接退出程序
+        SPDK_ERRLOG("Fatal error: Queue pool creation failed, exiting...\n");
         return -1;
     }
     
@@ -78,8 +79,12 @@ int xcoder_start_warmup(void) {
     
     if (warmup_ret != NUVCODER_STATUS_SUCCESS) {
         SPDK_ERRLOG("[Warmup] ❌ Encoder warmup failed with code %d\n", warmup_ret);
+        nuvcoder_codec_warmup_destroy();
+        SPDK_ERRLOG("[Warmup] nuvcoder_codec_warmup_destroy down\n");
         g_warmup_result = -1;
         g_warmup_done = 1;
+        // ✅ 直接退出程序
+        SPDK_ERRLOG("Fatal error: Encoder warmup failed, exiting...\n");
         return -1;
     }
     
@@ -92,8 +97,11 @@ int xcoder_start_warmup(void) {
     
     if (warmup_ret != NUVCODER_STATUS_SUCCESS) {
         SPDK_ERRLOG("[Warmup] ❌ Decoder warmup failed with code %d\n", warmup_ret);
+        
         g_warmup_result = -1;
         g_warmup_done = 1;
+        // ✅ 直接退出程序
+        SPDK_ERRLOG("Fatal error: Decoder warmup failed, exiting...\n");
         return -1;
     }
     

@@ -118,9 +118,16 @@ nvmf_tgt_started(void *arg1)
         rc = xcoder_wait_warmup(30000);  // 最多等30秒
         if (rc == 0) {
             printf("✅ Warmup completed successfully. Target is ready.\n");
+            printf("=== Target is now ready to accept connections ===\n\n");
         } else {
-            printf("⚠️  Warmup timed out. Target starting anyway.\n");
+            // 超时也视为失败
+            SPDK_ERRLOG("❌ Warmup timed out after 30 seconds. Exiting application.\n");
+            exit(rc);  // 直接 exit，不返回 main
         }
+    } else {
+        // 预热失败，退出
+        SPDK_ERRLOG("❌ Warmup failed with error code %d. Exiting application.\n", rc);
+        exit(rc);  // 直接 exit，不返回 main
     }
     
     printf("=== Target is now ready to accept connections ===\n\n");
