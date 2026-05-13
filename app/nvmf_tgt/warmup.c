@@ -28,6 +28,37 @@ static int64_t get_current_time_ms(void) {
 
 // ==================== 同步预热接口 ====================
 
+static bool __mix_codec_warmup(void) {
+    SPDK_NOTICELOG("\n=== Warming up mix encoders ===\n");
+    
+    // 硬件插件预热 (H.265)
+    nuvcoder_codec_config_t hw_warmup_config;
+    memset(&hw_warmup_config, 0, sizeof(hw_warmup_config));
+    // hw_warmup_config.max_frames_in_flight = 8;
+    hw_warmup_config.codec_type = NUVCODER_CODEC_TYPE_PLUGIN_H265;
+    int hw_warmup_ret = nuvcoder_codec_warmup(&hw_warmup_config);
+    if (hw_warmup_ret != NUVCODER_STATUS_SUCCESS) {
+        SPDK_NOTICELOG("HW plugin warmup failed! Error code:%d\n ",hw_warmup_ret);
+        return false;
+    }
+    SPDK_NOTICELOG("  ✅ HW Plugin (H.265 etc..) warmed up\n");
+    
+    // 软件后端预热 (AI)
+    nuvcoder_codec_config_t sw_warmup_config;
+    memset(&sw_warmup_config, 0, sizeof(sw_warmup_config));
+    // sw_warmup_config.max_frames_in_flight = 8;
+    sw_warmup_config.codec_type = NUVCODER_CODEC_TYPE_AICODEC;
+    int sw_warmup_ret = nuvcoder_codec_warmup(&sw_warmup_config);
+    if (sw_warmup_ret != NUVCODER_STATUS_SUCCESS) {
+        SPDK_NOTICELOG("AICodec backend warmup failed! Error code: %d\n ", sw_warmup_ret);
+        return false;
+    }
+    SPDK_NOTICELOG("  ✅ AICodec Backend (AI) warmed up\n");
+    
+    SPDK_NOTICELOG("✅ mix encoder warmup completed successfully\n");
+    return true;
+}
+
 int xcoder_start_warmup(void) {
     pthread_mutex_lock(&g_warmup_mutex);
     
@@ -72,12 +103,9 @@ int xcoder_start_warmup(void) {
     // ==================== 编码器预热 ====================
     SPDK_NOTICELOG("[Warmup] Warming up encoder...\n");
     
-    nuvcoder_codec_config_t warmup_config;
-    memset(&warmup_config, 0, sizeof(nuvcoder_codec_config_t));
-
-    int warmup_ret = nuvcoder_codec_warmup(&warmup_config);
+    int warmup_ret = __mix_codec_warmup();
     
-    if (warmup_ret != NUVCODER_STATUS_SUCCESS) {
+    if (warmup_ret != true) {
         SPDK_ERRLOG("[Warmup] ❌ Encoder warmup failed with code %d\n", warmup_ret);
         nuvcoder_codec_warmup_destroy();
         SPDK_ERRLOG("[Warmup] nuvcoder_codec_warmup_destroy down\n");
@@ -92,7 +120,8 @@ int xcoder_start_warmup(void) {
     
     // ==================== 解码器预热 ====================
     SPDK_NOTICELOG("[Warmup] Warming up decoder...\n");
-    
+    nuvcoder_codec_config_t warmup_config;
+    memset(&warmup_config, 0, sizeof(nuvcoder_codec_config_t));
     warmup_ret = nuvcoder_decoder_warmup(&warmup_config);
     
     if (warmup_ret != NUVCODER_STATUS_SUCCESS) {

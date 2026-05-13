@@ -210,7 +210,7 @@ static void xcoder_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *b
         // --- Write 逻辑 ---
         
         // 🟢 根据实例类型判断是否带 metadata
-        bool has_metadata = (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER);
+        bool has_metadata = (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER);
         
         int rc = 0;
         
@@ -393,39 +393,23 @@ static void xcoder_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *b
         } else {
             // 🟢 编码器：不带 metadata，直接处理
             
-            uint64_t expected_lba_offset = entry->input_length / HOST_LBA_SIZE;
-            
-            // 验证 LBA 是否连续
-            if (lba_offset != expected_lba_offset) {
-                printf("Encoder: Non-continuous write: expected LBA offset %lu, got %lu (data offset %zu)\n",
-                    expected_lba_offset, lba_offset, entry->input_length);
-                pthread_mutex_unlock(&instance->mutex);
-                xcoder_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
-                return;
-            }
+            // 移除连续性检查
+            // if (lba_offset != expected_lba_offset) { ... }
             
             uint8_t *iov_base = (uint8_t *)bdev_io->u.bdev.iovs[0].iov_base;
             size_t iov_len = bdev_io->u.bdev.iovs[0].iov_len;
             
-            // 安全检查：防止溢出
-            if (entry->input_length + iov_len > XCODER_MAX_BYTES_PER_FRAME) {
-                printf("Encoder write overflow: data offset %zu + %zu > MaxBuf %u\n", 
-                    entry->input_length, iov_len, XCODER_MAX_BYTES_PER_FRAME);
-                pthread_mutex_unlock(&instance->mutex);
-                xcoder_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
-                return;
-            }
+            // 直接使用 lba_offset 计算位置（支持乱序）
+            uint64_t write_offset = lba_offset * HOST_LBA_SIZE;
             
-            // 直接拷贝数据
-            uint8_t *src_ptr = iov_base;
-            uint8_t *dst_ptr = (uint8_t *)entry->input_buffer_dma + entry->input_length;
-            memcpy(dst_ptr, src_ptr, iov_len);
+            uint8_t *dst_ptr = (uint8_t *)entry->input_buffer_dma + write_offset;
+            memcpy(dst_ptr, iov_base, iov_len);
             
-            // 更新 entry 的输入长度
+            // 简单的累加（串行安全）
             entry->input_length += iov_len;
             
-            printf("Encoder后续: LBA offset=%lu, data offset=%zu, len=%zu, total_data=%zu\n",
-                lba_offset, entry->input_length - iov_len, iov_len, entry->input_length);
+            printf("Encoder写入: LBA offset=%lu, len=%zu, total_data=%zu\n",
+                lba_offset, iov_len, entry->input_length);
         }
         
         // 3. 触发逻辑
@@ -578,25 +562,54 @@ static void xcoder_bdev_process_frame_async(void *arg)
 {
     struct spdk_bdev_io *bdev_io = (struct spdk_bdev_io *)arg;
     
+    pthread_t current_thread = pthread_self();
+    uint64_t lba = xcoder_get_io_lba(bdev_io);
+    uint64_t num_blocks = xcoder_get_io_num_blocks(bdev_io);
+    const char *type_str = (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) ? "WRITE" : 
+                           (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) ? "READ" : "OTHER";
+    
+    printf("[TGT PROCESS] Thread=%lu, Type=%s, LBA=0x%08lx, Blocks=%lu, START\n",
+           current_thread, type_str, lba, num_blocks);
+    
     if (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) {
-        // printf(" xcoder_bdev_process_frame_async SPDK_BDEV_IO_TYPE_WRITE \n");
         uint64_t num_blocks = xcoder_get_io_num_blocks(bdev_io);
         size_t io_byte_len = XCODER_LBA_TO_BYTES(num_blocks);
+        printf("[TGT PROCESS] WRITE: num_blocks=%lu, byte_len=%zu, calling spdk_bdev_io_get_buf\n", 
+               num_blocks, io_byte_len);
         spdk_bdev_io_get_buf(bdev_io, xcoder_get_buf_cb, io_byte_len);
     } else if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
-        // printf(" xcoder_bdev_process_frame_async SPDK_BDEV_IO_TYPE_READ \n");
+        printf("[TGT PROCESS] READ: calling xcoder_get_buf_cb directly\n");
         xcoder_get_buf_cb(NULL, bdev_io, true);
     } else {
-        printf("Unsupported I/O type: %d\n", bdev_io->type);
+        printf("[TGT PROCESS] Unsupported I/O type: %d\n", bdev_io->type);
         xcoder_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
     }
+    
+    printf("[TGT PROCESS] Thread=%lu, Type=%s, LBA=0x%08lx, Blocks=%lu, END\n",
+           current_thread, type_str, lba, num_blocks);
 }
 
 static void xcoder_bdev_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
     (void)ch;
     struct xcoder_bdev *xb = (struct xcoder_bdev *)bdev_io->bdev->ctxt;
+    
+    // 获取当前线程 ID
+    pthread_t current_thread = pthread_self();
+    
+    // 获取 I/O 信息
+    uint64_t lba = xcoder_get_io_lba(bdev_io);
+    uint64_t num_blocks = xcoder_get_io_num_blocks(bdev_io);
+    const char *type_str = (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) ? "WRITE" : 
+                           (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) ? "READ" : "OTHER";
+    
+    printf("[TGT SUBMIT] Thread=%lu, Type=%s, LBA=0x%08lx, Blocks=%lu, TargetThread=%p\n",
+           current_thread, type_str, lba, num_blocks, xb->thread);
+    
+    // 发送到工作线程
     spdk_thread_send_msg(xb->thread, xcoder_bdev_process_frame_async, bdev_io);
+    
+    printf("[TGT SUBMIT] Message sent to work thread\n");
 }
 
 static bool xcoder_bdev_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)

@@ -38,7 +38,7 @@ void *nuvcoder_output_poller_thread(void *arg) {
         int api_call_rc;
 
         // 根据实例类型选择不同的API
-        if (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
+        if (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
             // 解码器：使用 nuvcoder_decoder_read_output
             api_call_rc = nuvcoder_decoder_read_output(
                 instance->nuvcoder_handle,
@@ -118,7 +118,7 @@ void *nuvcoder_output_poller_thread(void *arg) {
         } else {
             // 其他未知错误
             printf("Poller: %s API call returned unknown code %d for instance %u.\n",
-                   (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) ? 
+                   (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) ? 
                    "nuvcoder_decoder_read_output" : "nuvcoder_codec_read_output",
                    api_call_rc, instance_id);
             

@@ -270,7 +270,7 @@ int nuvcoder_send_frame(nuvcoder_queue_entry_t *entry) {
     size_t submit_len = entry->input_length;
     
     // 根据实例类型区分处理
-    if (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
+    if (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
         // ------------------------------------------------------------
         // 解码器分支：输入是码流，输出是重建帧
         // ------------------------------------------------------------
@@ -305,7 +305,9 @@ int nuvcoder_send_frame(nuvcoder_queue_entry_t *entry) {
         printf("Bitstream submitted to decoder for instance %u, entry %d, size %zu\n",
                instance->instance_id, entry->index, submit_len);
                
-    } else if (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_ENCODER) {
+    } else if ((instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_ENCODER) || 
+              (instance->config.type == NUVCODER_CODEC_TYPE_H264_VIDEO_ENCODER) ||
+               (instance->config.type == NUVCODER_CODEC_TYPE_H265_VIDEO_ENCODER) ) {
         // ------------------------------------------------------------
         // 编码器分支：输入是原始帧，输出是码流（原有逻辑）
         // ------------------------------------------------------------
@@ -398,7 +400,7 @@ xcoder_bitstream_status_t xcoder_get_bitstream_nonblocking(nuvcoder_queue_entry_
     }
 
     // 打印调试信息，区分编码器和解码器
-    if (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
+    if (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
         printf("Decoder instance %u: Entry %d completed successfully, output YUV size %zu bytes\n",
                instance->instance_id, entry->index, entry->output_actual_length);
     } else {
@@ -661,7 +663,7 @@ int xcoder_vsc_close_hdlr(struct spdk_nvmf_request *req) {
                 
                 // 2. 根据实例类型销毁 nuvcoder_handle
                 if (session->instances[i]->nuvcoder_handle) {
-                    if (session->instances[i]->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
+                    if (session->instances[i]->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
                         // 解码器：先 flush 再 destroy
                         SPDK_NOTICELOG("Flushing decoder instance %u during session destroy.\n", 
                                     session->instances[i]->instance_id);
@@ -718,7 +720,7 @@ int xcoder_vsc_close_hdlr(struct spdk_nvmf_request *req) {
             printf("Instance ID: %u\n", instance->instance_id);
             printf("Instance type: %d\n", instance->config.type);
             printf("Is decoder? %s\n", 
-                   (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) ? "YES" : "NO");
+                   (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) ? "YES" : "NO");
             printf("nuvcoder_handle: %p\n", instance->nuvcoder_handle);
             printf("poller_active: %d\n", instance->poller_active);
             printf("poller_args: %p\n", instance->poller_args);
@@ -742,7 +744,7 @@ int xcoder_vsc_close_hdlr(struct spdk_nvmf_request *req) {
         }
 
         // 2. 根据实例类型进行不同的清理
-        if (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
+        if (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER) {
             // ===== 解码器清理 =====
             SPDK_NOTICELOG("Shutting down decoder instance %u...\n", instance->instance_id);
             
@@ -766,7 +768,9 @@ int xcoder_vsc_close_hdlr(struct spdk_nvmf_request *req) {
                 SPDK_NOTICELOG("Decoder instance %u destroyed.\n", instance->instance_id);
             }
             
-        } else if (instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_ENCODER) {
+        } else if ((instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_ENCODER) || 
+              (instance->config.type == NUVCODER_CODEC_TYPE_H264_VIDEO_ENCODER) ||
+               (instance->config.type == NUVCODER_CODEC_TYPE_H265_VIDEO_ENCODER) ) {
             // ===== 编码器清理 - 简化版本，只使用实际存在的成员 =====
             SPDK_NOTICELOG("Shutting down encoder instance %u...\n", instance->instance_id);
             
@@ -974,13 +978,35 @@ int xcoder_vsc_config_hdlr(struct spdk_nvmf_request *req) {
             codec_config.max_input_frame_bytes = XCODER_MAX_BYTES_PER_FRAME;
             
             // 根据编码器类型设置内存模式
-            if (instance->config.type == XCODER_CODEC_TYPE_E2E_ENCODER || 
-                instance->config.type == XCODER_CODEC_TYPE_E2E_VIDEO_ENCODER) {
-                codec_config.mem_mode = NUVCODER_MEM_MODE_AUTO;
-            } else {
-                codec_config.mem_mode = NUVCODER_MEM_MODE_CPU_COPY;
+            // if ((instance->config.type == NUVCODER_CODEC_TYPE_E2E_ENCODER) || 
+            //     (instance->config.type == NUVCODER_CODEC_TYPE_E2E_VIDEO_ENCODER) || 
+            //   (instance->config.type == NUVCODER_CODEC_TYPE_H264_VIDEO_ENCODER) ||
+            //    (instance->config.type == NUVCODER_CODEC_TYPE_H265_VIDEO_ENCODER) ) {
+            //     codec_config.mem_mode = NUVCODER_MEM_MODE_AUTO;
+            // } else {
+            //     codec_config.mem_mode = NUVCODER_MEM_MODE_CPU_COPY;
+            // }
+            switch (instance->config.type)
+            {
+                case NUVCODER_CODEC_TYPE_E2E_ENCODER:
+                case NUVCODER_CODEC_TYPE_E2E_VIDEO_ENCODER:
+                    codec_config.mem_mode = NUVCODER_MEM_MODE_AUTO;
+                    codec_config.codec_type = NUVCODER_CODEC_TYPE_AICODEC;
+                    break;
+                case NUVCODER_CODEC_TYPE_H264_VIDEO_ENCODER:
+                    codec_config.mem_mode = NUVCODER_MEM_MODE_AUTO;
+                    codec_config.codec_type = NUVCODER_CODEC_TYPE_PLUGIN_H264;
+                    break;
+                case NUVCODER_CODEC_TYPE_H265_VIDEO_ENCODER:
+                    codec_config.mem_mode = NUVCODER_MEM_MODE_AUTO;
+                    codec_config.codec_type = NUVCODER_CODEC_TYPE_PLUGIN_H265;
+                    break;
+                
+                default:
+                    codec_config.mem_mode = NUVCODER_MEM_MODE_CPU_COPY;
+                    break;
             }
-            codec_config.max_frames_in_flight = 4;
+            codec_config.max_frames_in_flight = 8;
             if(instance->config.gop_size == 1) {
                 codec_config.all_i = 1;
             }else{

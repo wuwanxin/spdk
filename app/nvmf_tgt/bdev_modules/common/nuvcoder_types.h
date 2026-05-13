@@ -56,13 +56,18 @@
 
 
 // 编解码器类型
-enum xcoder_codec_type {
-    XCODER_CODEC_TYPE_NONE          = 0x00,
-    XCODER_CODEC_TYPE_E2E_ENCODER  = 0x01,
-    XCODER_CODEC_TYPE_E2E_DECODER  = 0x02,
-    XCODER_CODEC_TYPE_E2E_VIDEO_ENCODER  = 0x03,
-    XCODER_CODEC_TYPE_E2E_VIDEO_DECODER  = 0x04,
-    XCODER_CODEC_TYPE_POSTPROC        = 0x05, // 缩放器
+enum nuvcoder_codec_type {
+    NUVCODER_CODEC_TYPE_NONE                    = 0x00,
+    NUVCODER_CODEC_TYPE_E2E_ENCODER             = 0x01,
+    NUVCODER_CODEC_TYPE_E2E_DECODER             = 0x02,
+    NUVCODER_CODEC_TYPE_E2E_VIDEO_ENCODER       = 0x03,
+    NUVCODER_CODEC_TYPE_E2E_VIDEO_DECODER       = 0x04,
+
+    NUVCODER_CODEC_TYPE_H264_VIDEO_ENCODER      = 0x05,
+    NUVCODER_CODEC_TYPE_H264_VIDEO_DECODER      = 0x06,
+    NUVCODER_CODEC_TYPE_H265_VIDEO_ENCODER      = 0x07,
+    NUVCODER_CODEC_TYPE_H265_VIDEO_DECODER      = 0x08,
+
     // ... 其他类型
 };
 
@@ -79,7 +84,7 @@ enum xcoder_frame_format {
 
 // 实例配置
 typedef struct xcoder_instance_config {
-    enum xcoder_codec_type type;
+    enum nuvcoder_codec_type type;
     uint32_t width;
     uint32_t height;
     uint32_t bitrate_kbps; // 编码器特有
@@ -90,7 +95,7 @@ typedef struct xcoder_instance_config {
 } xcoder_instance_config_t;
 
 typedef struct xcoder_instance_dec_config {
-    enum xcoder_codec_type type;
+    enum nuvcoder_codec_type type;
     uint32_t width;
     uint32_t height;
     uint32_t fps;          // 帧率，例如 30, 60
